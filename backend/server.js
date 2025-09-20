@@ -240,7 +240,7 @@ app.use((error, req, res, next) => {
 });
 
 // health check
-app.use((req, res) => {
+app.use('/',(req, res) => {
   res.status(200).json({ message:"hello backend is working" });
 });
 
