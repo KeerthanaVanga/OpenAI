@@ -239,9 +239,9 @@ app.use((error, req, res, next) => {
   res.status(500).json({ error: error.message || 'Internal server error' });
 });
 
-// 404 handler
+// health check
 app.use((req, res) => {
-  res.status(404).json({ error: 'Endpoint not found' });
+  res.status(200).json({ message:"hello backend is working" });
 });
 
 // Start server
