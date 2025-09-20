@@ -258,12 +258,5 @@ app.listen(PORT, () => {
   }
 });
 
-if (process.env.NODE_ENV === "production") {
-  app.use(express.static(path.join(__dirname, "../OpenAI/dist")));
-
-  app.get("*", (req, res) => {
-    res.sendFile(path.join(__dirname, "../OpenAI", "dist", "index.html"));
-  });
-}
 
 module.exports = app;
