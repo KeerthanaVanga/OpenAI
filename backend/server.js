@@ -1,269 +1,308 @@
-const express = require('express');
-const multer = require('multer');
-const cors = require('cors');
-const fs = require('fs').promises;
-const path = require('path');
-const { GoogleGenerativeAI } = require('@google/generative-ai');
-require('dotenv').config();
+// server.mjs  (or server.js with "type": "module" in package.json)
+import express from "express";
+import multer from "multer";
+import cors from "cors";
+import { promises as fs } from "fs";
+import path from "path";
+import dotenv from "dotenv";
+import { fileURLToPath } from "url";
+import { GoogleGenAI } from "@google/genai";
+
+dotenv.config();
+
+function extractText(genaiResponse) {
+  // Newer SDKs expose a .text() method
+  if (genaiResponse && typeof genaiResponse.text === "function") {
+    return genaiResponse.text();
+  }
+  // Fallback: stitch together text parts from the first candidate
+  const parts = genaiResponse?.candidates?.[0]?.content?.parts;
+  if (Array.isArray(parts)) {
+    return parts
+      .map((p) => (typeof p?.text === "string" ? p.text : ""))
+      .join("");
+  }
+  // Last resort: stringify so you at least see something
+  return JSON.stringify(genaiResponse);
+}
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
 
 const app = express();
 const PORT = process.env.PORT || 4000;
+const MODEL_ID = "gemini-2.0-flash";
 
-// Initialize Gemini AI
-const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
+// Prefer GOOGLE_API_KEY, fallback to GEMINI_API_KEY
+const apiKey =
+  process.env.GOOGLE_API_KEY || "";
+const  ai= new GoogleGenAI({ apiKey });
 
 // Middleware
 app.use(cors());
-app.use(express.json({ limit: '50mb' }));
-app.use(express.urlencoded({ extended: true, limit: '50mb' }));
+app.use(express.json({ limit: "50mb" }));
+app.use(express.urlencoded({ extended: true, limit: "50mb" }));
 
-// Configure multer for file uploads
+// Multer for uploads
 const storage = multer.diskStorage({
   destination: (req, file, cb) => {
-    const uploadDir = 'uploads';
-    // Create uploads directory if it doesn't exist
-    require('fs').mkdirSync(uploadDir, { recursive: true });
+    const uploadDir = path.join(__dirname, "uploads");
+    // ensure dir
+    try {
+      // use fs from 'fs' (sync path) just for simplicity
+      require("fs").mkdirSync(uploadDir, { recursive: true });
+    } catch {}
     cb(null, uploadDir);
   },
   filename: (req, file, cb) => {
-    // Generate unique filename
-    const uniqueSuffix = Date.now() + '-' + Math.round(Math.random() * 1E9);
-    cb(null, file.fieldname + '-' + uniqueSuffix + path.extname(file.originalname));
-  }
+    const uniqueSuffix = Date.now() + "-" + Math.round(Math.random() * 1e9);
+    cb(
+      null,
+      `${file.fieldname}-${uniqueSuffix}${path.extname(file.originalname)}`
+    );
+  },
 });
 
 const upload = multer({
-  storage: storage,
-  limits: {
-    fileSize: 10 * 1024 * 1024, // 10MB limit
-    files: 10 // Max 10 files
-  },
+  storage,
+  limits: { fileSize: 10 * 1024 * 1024, files: 10 }, // 10MB, max 10 files
   fileFilter: (req, file, cb) => {
-    // Allow images and common document types
-    const allowedTypes = [
-      'image/jpeg', 'image/jpg', 'image/png', 'image/gif', 'image/webp',
-      'text/plain', 'text/markdown',
-      'application/pdf',
-      'application/msword',
-      'application/vnd.openxmlformats-officedocument.wordprocessingml.document'
-    ];
-    
-    if (allowedTypes.includes(file.mimetype)) {
-      cb(null, true);
-    } else {
-      cb(new Error(`File type ${file.mimetype} is not supported`), false);
-    }
-  }
+    const allowed = new Set([
+      "image/jpeg",
+      "image/jpg",
+      "image/png",
+      "image/gif",
+      "image/webp",
+      "text/plain",
+      "text/markdown",
+      "application/pdf",
+      "application/msword",
+      "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+    ]);
+    cb(
+      allowed.has(file.mimetype)
+        ? null
+        : new Error(`File type ${file.mimetype} is not supported`),
+      allowed.has(file.mimetype)
+    );
+  },
 });
 
-// Helper function to convert file to generative part for Gemini
+// helpers
 async function fileToGenerativePart(filePath, mimeType) {
-  try {
-    const fileData = await fs.readFile(filePath);
-    return {
-      inlineData: {
-        data: fileData.toString('base64'),
-        mimeType: mimeType,
-      },
-    };
-  } catch (error) {
-    console.error('Error reading file:', error);
-    throw new Error('Failed to process uploaded file');
-  }
+  const fileData = await fs.readFile(filePath);
+  return {
+    inlineData: {
+      data: fileData.toString("base64"),
+      mimeType,
+    },
+  };
 }
 
-// Helper function to read text files
 async function readTextFile(filePath) {
-  try {
-    const content = await fs.readFile(filePath, 'utf8');
-    return content;
-  } catch (error) {
-    console.error('Error reading text file:', error);
-    throw new Error('Failed to read text file');
-  }
+  return fs.readFile(filePath, "utf8");
 }
 
-// Main chat endpoint
-app.post('/chat', upload.array('files', 10), async (req, res) => {
+// CHAT endpoint (uses @google/genai)
+app.post("/chat", upload.array("files", 10), async (req, res) => {
+  // cleanup helper to remove any uploaded temp files
+  const cleanup = async () => {
+    if (req.files && req.files.length) {
+      await Promise.all(
+        req.files.map(async (f) => {
+          try {
+            await fs.unlink(f.path);
+          } catch {}
+        })
+      );
+    }
+  };
+
   try {
     const { prompt } = req.body;
     const files = req.files || [];
 
     if (!prompt && files.length === 0) {
-      return res.status(400).json({ error: 'Please provide a prompt or upload files' });
+      await cleanup();
+      return res
+        .status(400)
+        .json({ error: "Please provide a prompt or upload files" });
     }
 
-    if (!process.env.GEMINI_API_KEY) {
-      return res.status(500).json({ error: 'Gemini API key not configured' });
+    if (!apiKey) {
+      await cleanup();
+      return res.status(500).json({ error: "Gemini API key not configured" });
     }
 
-    // Get the generative model
-    const model = genAI.getGenerativeModel({ model: "gemini-1.5-flash" });
+    // Build the "parts" array for the user message
+    const userParts = [];
+    if (prompt) userParts.push({ text: String(prompt) });
 
-    let parts = [];
-    
-    // Add the text prompt if provided
-    if (prompt) {
-      parts.push(prompt);
-    }
-
-    // Process uploaded files
     for (const file of files) {
       try {
         const mimeType = file.mimetype;
         const filePath = file.path;
 
-        if (mimeType.startsWith('image/')) {
-          // Handle image files
+        if (mimeType.startsWith("image/")) {
+          // Image -> inlineData
           const imagePart = await fileToGenerativePart(filePath, mimeType);
-          parts.push(imagePart);
-          
-          // Add context for image analysis if no prompt provided
+          userParts.push(imagePart);
           if (!prompt) {
-            parts.push("Please analyze this image and describe what you see in detail.");
+            userParts.push({
+              text: "Please analyze this image and describe what you see in detail.",
+            });
           }
-        } else if (mimeType === 'text/plain' || mimeType === 'text/markdown') {
-          // Handle text files
+        } else if (mimeType === "text/plain" || mimeType === "text/markdown") {
+          // Text files -> inline text
           const textContent = await readTextFile(filePath);
-          parts.push(`Content of file "${file.originalname}":\n${textContent}`);
-          
-          if (!prompt) {
-            parts.push("Please summarize the content of this file.");
-          }
-        } else if (mimeType === 'application/pdf' || 
-                   mimeType === 'application/msword' || 
-                   mimeType === 'application/vnd.openxmlformats-officedocument.wordprocessingml.document') {
-          // For PDF and Word documents, we'll inform the user that we need text extraction
-          parts.push(`I received a ${mimeType.includes('pdf') ? 'PDF' : 'Word'} document named "${file.originalname}". 
-                     For better analysis, please convert this document to plain text or paste the content directly.`);
+          userParts.push({
+            text: `Content of file "${file.originalname}":\n${textContent}`,
+          });
+          if (!prompt)
+            userParts.push({
+              text: "Please summarize the content of this file.",
+            });
+        } else if (
+          mimeType === "application/pdf" ||
+          mimeType === "application/msword" ||
+          mimeType ===
+            "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+        ) {
+          // PDFs / Word: ask for text
+          userParts.push({
+            text:
+              `I received a ${
+                mimeType.includes("pdf") ? "PDF" : "Word"
+              } document named "${file.originalname}". ` +
+              `For better analysis, please convert this document to plain text or paste the content directly.`,
+          });
         }
-
-        // Clean up uploaded file
-        await fs.unlink(filePath);
-      } catch (fileError) {
-        console.error('Error processing file:', file.originalname, fileError);
-        // Continue processing other files
+      } catch (fileErr) {
+        console.error("Error processing file:", file.originalname, fileErr);
+        // keep going for other files
       }
     }
 
-    if (parts.length === 0) {
-      return res.status(400).json({ error: 'No valid content to process' });
+    // Always attempt to remove temp files after we’ve read them
+    await cleanup();
+
+    if (userParts.length === 0) {
+      return res.status(400).json({ error: "No valid content to process" });
     }
 
-    console.log('Sending request to Gemini with', parts.length, 'parts');
+    console.log("Sending request to Gemini with", userParts.length, "parts");
 
-    // Generate content using Gemini
-    const result = await model.generateContent(parts);
-    const response = await result.response;
-    const output = response.text();
-
-    res.json({ 
-      output: output,
-      filesProcessed: files.length
+    const result = await ai.models.generateContent({
+      model: MODEL_ID,
+      contents: [{ role: "user", parts: userParts }],
     });
 
+    const output = extractText(result);
+    return res.json({ output, filesProcessed: req.files?.length || 0 });
   } catch (error) {
-    console.error('Error in chat endpoint:', error);
-    
-    // Clean up any uploaded files in case of error
-    if (req.files) {
-      req.files.forEach(async (file) => {
-        try {
-          await fs.unlink(file.path);
-        } catch (cleanupError) {
-          console.error('Error cleaning up file:', cleanupError);
-        }
-      });
+    console.error("Error in chat endpoint:", error);
+
+    // best-effort cleanup
+    try {
+      if (req.files?.length) {
+        await Promise.all(
+          req.files.map((f) => fs.unlink(f.path).catch(() => {}))
+        );
+      }
+    } catch {}
+
+    const msg = error?.message || String(error);
+
+    if (msg.includes("API key") || msg.includes("UNAUTHENTICATED")) {
+      return res.status(500).json({ error: "Invalid API key configuration" });
+    }
+    if (msg.includes("SAFETY")) {
+      return res
+        .status(400)
+        .json({ error: "Content was blocked by safety filters" });
+    }
+    if (msg.includes("QUOTA") || msg.includes("RESOURCE_EXHAUSTED")) {
+      return res
+        .status(429)
+        .json({ error: "API quota exceeded. Please try again later." });
     }
 
-    // Handle specific Gemini AI errors
-    if (error.message.includes('API_KEY')) {
-      return res.status(500).json({ error: 'Invalid API key configuration' });
-    } else if (error.message.includes('SAFETY')) {
-      return res.status(400).json({ error: 'Content was blocked by safety filters' });
-    } else if (error.message.includes('QUOTA_EXCEEDED')) {
-      return res.status(429).json({ error: 'API quota exceeded. Please try again later.' });
-    }
-
-    res.status(500).json({ 
-      error: error.message || 'Internal server error',
-      details: process.env.NODE_ENV === 'development' ? error.stack : undefined
+    return res.status(500).json({
+      error: msg,
+      details: process.env.NODE_ENV === "development" ? error.stack : undefined,
     });
   }
 });
 
-// Health check endpoint
-app.get('/health', (req, res) => {
-  res.json({ 
-    status: 'healthy', 
+// Health
+app.get("/health", (req, res) => {
+  res.json({
+    status: "healthy",
     timestamp: new Date().toISOString(),
-    geminiConfigured: !!process.env.GEMINI_API_KEY
+    geminiConfigured: Boolean(apiKey),
+    model: MODEL_ID,
   });
 });
 
-// Test endpoint to verify Gemini connection
-app.get('/test-gemini', async (req, res) => {
+// Test endpoint
+app.get("/test-gemini", async (req, res) => {
   try {
-    if (!process.env.GEMINI_API_KEY) {
-      return res.status(500).json({ error: 'Gemini API key not configured' });
+    if (!apiKey) {
+      return res.status(500).json({ error: "Gemini API key not configured" });
     }
-
-    const model = genAI.getGenerativeModel({ model: "gemini-1.5-flash" });
-    const result = await model.generateContent("Hello, please respond with 'Gemini AI is working correctly!'");
-    const response = await result.response;
-    
-    res.json({ 
-      status: 'success',
-      message: response.text()
+    const result = await ai.models.generateContent({
+      model: MODEL_ID,
+      contents: [
+        {
+          role: "user",
+          parts: [
+            { text: "Respond exactly with: Gemini AI is working correctly!" },
+          ],
+        },
+      ],
     });
+    return res.json({ status: "success", message: extractText(result) });
   } catch (error) {
-    console.error('Gemini test error:', error);
-    res.status(500).json({ 
-      error: 'Failed to connect to Gemini AI',
-      details: error.message
+    console.error("Gemini test error:", error);
+    return res.status(500).json({
+      error: "Failed to connect to Gemini AI",
+      details: error.message,
     });
   }
 });
 
-// Error handling middleware
+// Multer error handling + general error handler
 app.use((error, req, res, next) => {
   if (error instanceof multer.MulterError) {
-    if (error.code === 'LIMIT_FILE_SIZE') {
-      return res.status(400).json({ error: 'File too large. Maximum size is 10MB.' });
-    } else if (error.code === 'LIMIT_FILE_COUNT') {
-      return res.status(400).json({ error: 'Too many files. Maximum is 10 files.' });
+    if (error.code === "LIMIT_FILE_SIZE") {
+      return res
+        .status(400)
+        .json({ error: "File too large. Maximum size is 10MB." });
+    }
+    if (error.code === "LIMIT_FILE_COUNT") {
+      return res
+        .status(400)
+        .json({ error: "Too many files. Maximum is 10 files." });
     }
   }
-  
-  console.error('Unhandled error:', error);
-  res.status(500).json({ error: error.message || 'Internal server error' });
+  console.error("Unhandled error:", error);
+  res.status(500).json({ error: error.message || "Internal server error" });
 });
 
-// 404 handler
-app.use((req, res) => {
-  res.status(404).json({ error: 'Endpoint not found' });
+// Simple root
+app.use("/", (req, res) => {
+  res.status(200).json({ message: "hello backend is working" });
 });
 
 // Start server
 app.listen(PORT, () => {
   console.log(`🚀 Server running on port ${PORT}`);
-  console.log(`📍 Health check: http://localhost:${PORT}/health`);
-  console.log(`🧪 Test Gemini: http://localhost:${PORT}/test-gemini`);
+  console.log(`📍 Health check:  http://localhost:${PORT}/health`);
+  console.log(`🧪 Test Gemini:   http://localhost:${PORT}/test-gemini`);
   console.log(`💬 Chat endpoint: http://localhost:${PORT}/chat`);
-  
-  if (!process.env.GEMINI_API_KEY) {
-    console.log('⚠️  WARNING: GEMINI_API_KEY not found in environment variables');
+  if (!apiKey) {
+    console.log("⚠️  WARNING: GOOGLE_API_KEY / GEMINI_API_KEY not found");
   } else {
-    console.log('✅ Gemini API key configured');
+    console.log("✅ Gemini API key configured");
   }
 });
-
-if (process.env.NODE_ENV === "production") {
-  app.use(express.static(path.join(__dirname, "../OpenAI/dist")));
-
-  app.get("*", (req, res) => {
-    res.sendFile(path.join(__dirname, "../OpenAI", "dist", "index.html"));
-  });
-}
-
-module.exports = app;

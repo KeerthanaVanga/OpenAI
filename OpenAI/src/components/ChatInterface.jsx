@@ -2,7 +2,7 @@
 import React, { useState, useRef, useEffect } from "react";
 import { Send, Paperclip, FileText, Loader2, Copy, Check, Plus, Minimize2 } from "lucide-react";
 
-const BASE_URL = import.meta.env.MODE === "development" ? "http://localhost:4000" : "/";
+const BASE_URL = import.meta.env.VITE_URL
 
 const ChatInterface = () => {
   const [messages, setMessages] = useState([]);

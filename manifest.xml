@@ -12,7 +12,7 @@
     <Host Name="Document" />
   </Hosts>
   <DefaultSettings>
-    <SourceLocation DefaultValue="https://fadaaa0940f0.ngrok-free.app" />
+    <SourceLocation DefaultValue="https://0cdf5c0a12cf.ngrok-free.app" />
   </DefaultSettings>
   <Permissions>ReadWriteDocument</Permissions>
 </OfficeApp>
