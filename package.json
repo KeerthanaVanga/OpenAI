@@ -4,7 +4,7 @@
   "description": "",
   "main": "index.js",
   "scripts": {
-    "build": "npm install --prefix backend && npm install --prefix openai && npm run build --prefix openai",
+    "build": "npm install --prefix backend && npm install --prefix OpenAI && npm run build --prefix OpenAI",
     "start": "npm run start --prefix backend"
   },
   "keywords": [],

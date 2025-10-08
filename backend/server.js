@@ -289,9 +289,15 @@ app.use((error, req, res, next) => {
   res.status(500).json({ error: error.message || "Internal server error" });
 });
 
+
 // Simple root
 app.use("/", (req, res) => {
   res.status(200).json({ message: "hello backend is working" });
+})
+
+// health check
+app.use('/',(req, res) => {
+  res.status(200).json({ message:"hello backend is working" });
 });
 
 // Start server
@@ -306,3 +312,8 @@ app.listen(PORT, () => {
     console.log("✅ Gemini API key configured");
   }
 });
+
+
+
+module.exports = app;
+
